@@ -1,0 +1,11 @@
+[package]
+name = "tomochan-dict"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bincode = "2"
+fst = "0.4.7"
+serde_json = "1.0.149"
+zeekstd = "0.6.2"
+rand = "0.8.5"
