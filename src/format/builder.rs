@@ -1,7 +1,7 @@
 use super::store::UnifiedStoreBuilder;
-use super::types::DataType;
+use super::types::{Queryable, QueryKindKey};
 use super::index::{UnifiedFstIndex, UnifiedIndex};
-use crate::schema::{Term, Kanji, Tag, TermMeta, KanjiMeta, Dictionary, Indexable, BINCODE_CONFIG};
+use crate::schema::{Dictionary, BINCODE_CONFIG};
 use std::collections::HashMap;
 use std::fs;
 use bincode::{Encode, Decode};
@@ -42,7 +42,7 @@ pub struct DictionaryIndexBuilder {
     tag_keys: HashMap<String, Vec<u64>>,
     term_meta_keys: HashMap<String, Vec<u64>>,
     kanji_meta_keys: HashMap<String, Vec<u64>>,
-    extra_file_keys: HashMap<String, Vec<u64>>,
+    file_keys: HashMap<String, Vec<u64>>,
     
     source_dir: Option<String>,
 }
@@ -56,7 +56,7 @@ impl DictionaryIndexBuilder {
             tag_keys: HashMap::new(),
             term_meta_keys: HashMap::new(),
             kanji_meta_keys: HashMap::new(),
-            extra_file_keys: HashMap::new(),
+            file_keys: HashMap::new(),
             source_dir: None,
         })
     }
@@ -71,52 +71,31 @@ impl DictionaryIndexBuilder {
         keys: &mut HashMap<String, Vec<u64>>,
     ) -> Result<(), String>
     where
-        T: Indexable + bincode::Encode,
+        T: Queryable + bincode::Encode,
     {
         let builder = builder.as_mut()
             .ok_or("builder already finalized")?;
 
         for item in items {
-            let key = item.lookup_key();
             let id = builder.insert(&item)?;
-            keys.entry(key).or_default().push(id);
+            keys.entry(item.key()).or_default().push(id);
         }
 
         Ok(())
     }
-    
-    pub fn import_terms(&mut self, terms: Vec<Term>) -> Result<(), String> {
-        Self::import_items(terms, &mut self.store_builder, &mut self.term_keys)
-    }
-
-    pub fn import_kanji(&mut self, kanji_list: Vec<Kanji>) -> Result<(), String> {
-        Self::import_items(kanji_list, &mut self.store_builder, &mut self.kanji_keys)
-    }
-
-    pub fn import_tags(&mut self, tags: Vec<Tag>) -> Result<(), String> {
-        Self::import_items(tags, &mut self.store_builder, &mut self.tag_keys)
-    }
-
-    pub fn import_term_meta(&mut self, meta_list: Vec<TermMeta>) -> Result<(), String> {
-        Self::import_items(meta_list, &mut self.store_builder, &mut self.term_meta_keys)
-    }
-
-    pub fn import_kanji_meta(&mut self, meta_list: Vec<KanjiMeta>) -> Result<(), String> {
-        Self::import_items(meta_list, &mut self.store_builder, &mut self.kanji_meta_keys)
-    }
 
     pub fn import_dictionary(&mut self, dict: Dictionary) -> Result<(), String> {
-        self.import_terms(dict.terms)?;
-        self.import_kanji(dict.kanji)?;
-        self.import_tags(dict.tags)?;
-        self.import_term_meta(dict.term_meta)?;
-        self.import_kanji_meta(dict.kanji_meta)?;
+        Self::import_items(dict.terms, &mut self.store_builder, &mut self.term_keys)?;
+        Self::import_items(dict.kanji, &mut self.store_builder, &mut self.kanji_keys)?;
+        Self::import_items(dict.tags, &mut self.store_builder, &mut self.tag_keys)?;
+        Self::import_items(dict.term_meta, &mut self.store_builder, &mut self.term_meta_keys)?;
+        Self::import_items(dict.kanji_meta, &mut self.store_builder, &mut self.kanji_meta_keys)?;
         Ok(())
     }
     
-    fn collect_extra_files(&mut self) -> Result<(), String> {
+    fn collect_files(&mut self) -> Result<(), String> {
         if let Some(source_dir) = &self.source_dir {
-            Self::collect_files_recursive(source_dir, source_dir, &mut self.store_builder, &mut self.extra_file_keys)?;
+            Self::collect_files_recursive(source_dir, source_dir, &mut self.store_builder, &mut self.file_keys)?;
         }
         Ok(())
     }
@@ -167,10 +146,10 @@ impl DictionaryIndexBuilder {
     }
 
     pub fn finalize_to_single_file(mut self, output_path: &str) -> Result<(), String> {
-        println!("Collecting extra files...");
-        self.collect_extra_files()?;
-        if !self.extra_file_keys.is_empty() {
-            println!("  Found {} extra file(s)", self.extra_file_keys.len());
+        println!("Collecting files...");
+        self.collect_files()?;
+        if !self.file_keys.is_empty() {
+            println!("  Found {} file(s)", self.file_keys.len());
         }
         
         let store_builder = self.store_builder.take()
@@ -179,12 +158,12 @@ impl DictionaryIndexBuilder {
         
         println!("Building unified FST index...");
         let typed_mappings = vec![
-            (DataType::Term, self.term_keys),
-            (DataType::Kanji, self.kanji_keys),
-            (DataType::Tag, self.tag_keys),
-            (DataType::TermMeta, self.term_meta_keys),
-            (DataType::KanjiMeta, self.kanji_meta_keys),
-            (DataType::ExtraFile, self.extra_file_keys),
+            (QueryKindKey::Term, self.term_keys),
+            (QueryKindKey::Kanji, self.kanji_keys),
+            (QueryKindKey::Tag, self.tag_keys),
+            (QueryKindKey::TermMeta, self.term_meta_keys),
+            (QueryKindKey::KanjiMeta, self.kanji_meta_keys),
+            (QueryKindKey::File, self.file_keys),
         ];
         
         let fst = UnifiedFstIndex::build(typed_mappings)?;
@@ -218,20 +197,12 @@ impl DictionaryIndexBuilder {
     }
 }
 
-pub struct DictionaryLookup {
-    pub terms: UnifiedIndex,
-}
-
-impl DictionaryLookup {
-    pub fn open_package(package_file: &str) -> Result<Self, String> {
-        let package = DictionaryPackage::load(package_file)?;
-        
-        let fst = UnifiedFstIndex::from_bytes(package.fst)?;
-        let store = super::store::UnifiedStore::new(package.data)?;
-        let unified_index = UnifiedIndex::new(fst, store);
-        
-        Ok(Self {
-            terms: unified_index,
-        })
-    }
+pub fn open_package(package_file: &str) -> Result<UnifiedIndex, String> {
+    let package = DictionaryPackage::load(package_file)?;
+    
+    let fst = UnifiedFstIndex::from_bytes(package.fst)?;
+    let store = super::store::UnifiedStore::new(package.data)?;
+    let unified_index = UnifiedIndex::new(fst, store);
+    
+    Ok(unified_index)
 }

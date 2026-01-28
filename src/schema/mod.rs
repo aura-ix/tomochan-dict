@@ -1,5 +1,5 @@
 use bincode::{Encode, Decode};
-use std::{fs, io::Read, path::Path};
+use std::{fs, path::Path};
 
 mod dictionary_index;
 mod kanji_bank;
@@ -8,7 +8,6 @@ mod tag_bank;
 mod term_bank;
 mod term_meta_bank;
 
-mod indexable;
 mod json_helpers;
 
 pub use dictionary_index::DictionaryIndex;
@@ -17,7 +16,6 @@ pub use kanji_meta_bank::KanjiMeta;
 pub use tag_bank::Tag;
 pub use term_bank::Term;
 pub use term_meta_bank::{TermMeta, Frequency, FrequencyValue};
-pub use indexable::Indexable;
 
 pub(crate) use json_helpers::*;
 
@@ -82,20 +80,5 @@ impl Dictionary {
             }
         }
         Ok(all)
-    }
-
-    pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result<(), String> {
-        let encoded = bincode::encode_to_vec(self, BINCODE_CONFIG)
-            .map_err(|e| format!("Failed to encode dictionary: {}", e))?;
-        fs::write(path, encoded).map_err(|e| format!("Failed to write file: {}", e))
-    }
-
-    pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, String> {
-        let mut buffer = Vec::new();
-        fs::File::open(&path).and_then(|mut f| f.read_to_end(&mut buffer))
-            .map_err(|e| format!("Failed to read file: {}", e))?;
-        bincode::decode_from_slice(&buffer, BINCODE_CONFIG)
-            .map(|(dict, _)| dict)
-            .map_err(|e| format!("Failed to decode dictionary: {}", e))
     }
 }

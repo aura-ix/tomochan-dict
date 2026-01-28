@@ -5,8 +5,9 @@ use std::time::{Duration, Instant};
 mod schema;
 mod format;
 
-use schema::Dictionary;
-use format::{DictionaryIndexBuilder, DictionaryLookup};
+use schema::{Dictionary, Term, Kanji, Tag, TermMeta, KanjiMeta};
+use format::index::UnifiedIndex;
+use format::DictionaryIndexBuilder;
 
 fn print_results<T: std::fmt::Debug>(results: &[T]) {
     if results.is_empty() {
@@ -129,9 +130,9 @@ fn lookup_command(dict_files: &str, lookup_type: &str, key: &str) -> Result<(), 
     
     println!("Loading {} dictionary/dictionaries...", files.len());
     
-    let mut lookups: Vec<DictionaryLookup> = files
+    let mut lookups: Vec<UnifiedIndex> = files
         .iter()
-        .map(|file| DictionaryLookup::open_package(file))
+        .map(|file| format::builder::open_package(file))
         .collect::<Result<Vec<_>, _>>()?;
     
     for (idx, lookup) in lookups.iter_mut().enumerate() {
@@ -141,28 +142,27 @@ fn lookup_command(dict_files: &str, lookup_type: &str, key: &str) -> Result<(), 
         
         match lookup_type {
             "term" => {
-                let results = lookup.terms.lookup_terms_full(key);
+                let results = lookup.query::<Term>(key);
                 print_results(&results);
             }
             "kanji" => {
-                let results = lookup.terms.lookup_kanji_full(key);
+                let results = lookup.query::<Kanji>(key);
                 print_results(&results);
             }
             "tag" => {
-                let result = lookup.terms.lookup_tag(key);
-                print_optional(&result);
+                let result = lookup.query::<Tag>(key);
+                print_results(&result);
             }
             "term-meta" => {
-                let results = lookup.terms.lookup_term_meta_full(key);
+                let results = lookup.query::<TermMeta>(key);
                 print_results(&results);
             }
             "kanji-meta" => {
-                let results = lookup.terms.lookup_kanji_meta_full(key);
+                let results = lookup.query::<KanjiMeta>(key);
                 print_results(&results);
             }
             "file" => {
-                if let Some(offset) = lookup.terms.lookup_extra_file(key) {
-                    let data = lookup.terms.get_extra_file(offset)?;
+                if let Some(data) = lookup.query_file(key) {
                     println!("File found: {} bytes", data.len());
                 } else {
                     println!("File not found");
@@ -184,9 +184,9 @@ fn benchmark_random_lookups(package_file: &str, count: usize) -> Result<(), Stri
     }
     
     let load_start = Instant::now();
-    let mut lookups: Vec<DictionaryLookup> = package_files
+    let mut lookups: Vec<UnifiedIndex> = package_files
         .iter()
-        .map(|file| DictionaryLookup::open_package(file))
+        .map(|file| format::builder::open_package(file))
         .collect::<Result<Vec<_>, _>>()?;
     let load_time = load_start.elapsed();
     
@@ -200,7 +200,7 @@ fn benchmark_random_lookups(package_file: &str, count: usize) -> Result<(), Stri
     let mut all_terms: Vec<(usize, String)> = Vec::new();
     
     for (dict_idx, lookup) in lookups.iter().enumerate() {
-        let keys = lookup.terms.term_keys();
+        let keys = lookup.term_keys();
         println!("  Dictionary {}: {} terms", dict_idx + 1, keys.len());
         for key in keys {
             all_terms.push((dict_idx, key));
@@ -226,7 +226,7 @@ fn benchmark_random_lookups(package_file: &str, count: usize) -> Result<(), Stri
         let (dict_idx, term) = &all_terms[idx];
         
         let start = Instant::now();
-        let results = lookups[*dict_idx].terms.lookup_terms_full(term);
+        let results = lookups[*dict_idx].query::<Term>(term);
         let elapsed = start.elapsed();
         
         total_results += results.len();

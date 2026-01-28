@@ -1,7 +1,6 @@
-use super::types::{TermId, KanjiId, TagId, TermMetaId, KanjiMetaId};
-use crate::schema::{Term, Kanji, Tag, TermMeta, KanjiMeta, BINCODE_CONFIG};
+use crate::schema::BINCODE_CONFIG;
 use std::io::Write;
-use zeekstd::{Encoder, Decoder, EncodeOptions};
+use zeekstd::{Decoder, EncodeOptions};
 
 const ZSTD_COMPRESSION_LEVEL: i32 = 19;
 
@@ -42,7 +41,7 @@ impl UnifiedStoreBuilder {
             .map_err(|e| format!("Failed to write data: {}", e))?;
         
         encoder.finish()
-            .map_err(|e| format!("Failed to finalize compressed data: {}", e));
+            .map_err(|e| format!("Failed to finalize compressed data: {}", e))?;
 
         Ok(buffer)
     }
@@ -69,29 +68,5 @@ impl UnifiedStore {
             .map_err(|e| format!("bincode deserialization failed: {}", e))?;
         
         Ok(item)
-    }
-    
-    pub fn get_term(&mut self, id: TermId) -> Result<Term, String> {
-        self.get(id.0)
-    }
-    
-    pub fn get_kanji(&mut self, id: KanjiId) -> Result<Kanji, String> {
-        self.get(id.0)
-    }
-    
-    pub fn get_tag(&mut self, id: TagId) -> Result<Tag, String> {
-        self.get(id.0)
-    }
-    
-    pub fn get_term_meta(&mut self, id: TermMetaId) -> Result<TermMeta, String> {
-        self.get(id.0)
-    }
-    
-    pub fn get_kanji_meta(&mut self, id: KanjiMetaId) -> Result<KanjiMeta, String> {
-        self.get(id.0)
-    }
-    
-    pub fn get_extra_file(&mut self, offset: u64) -> Result<Vec<u8>, String> {
-        self.get(offset)
     }
 }
