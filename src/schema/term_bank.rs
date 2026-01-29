@@ -6,8 +6,8 @@ pub struct Term {
     pub term: String,
     pub reading: String,
     pub definitions: Vec<Definition>,
-    pub score: f32,
-    pub sequence: i32,
+    pub score: f32, // TODO: utilize score
+    pub sequence: i32, // TODO: utilize sequence
     pub definition_tags: String,
     pub rules: String,
     pub term_tags: String,

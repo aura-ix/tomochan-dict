@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 mod schema;
 mod format;
+mod deinflect;
 
 use schema::{Dictionary, Term, Kanji, Tag, TermMeta, KanjiMeta};
 use format::index::UnifiedIndex;
@@ -40,6 +41,9 @@ fn main() {
         "lookup" if args.len() >= 5 => {
             lookup_command(&args[2], &args[3], &args[4])
         }
+        "lookup-deinflect" if args.len() >= 5 => {
+            lookup_deinflected_command(&args[2], &args[3], &args[4])
+        }
         "lookup-random" if args.len() >= 3 => {
             let count = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(100);
             benchmark_random_lookups(&args[2], count)
@@ -55,6 +59,10 @@ fn main() {
         }
         "lookup-random" => {
             eprintln!("Usage: {} lookup-random <dictionaries> [count]", args[0]);
+            process::exit(1);
+        }
+        "lookup-deinflect" => {
+            eprintln!("Usage: {} lookup-deinflect <dictionaries> <deinflection_file> <term>", args[0]);
             process::exit(1);
         }
         _ => {
@@ -94,6 +102,7 @@ fn print_usage(program: &str) {
     eprintln!("  {} lookup ./jmdict.yomidict term 読む", program);
     eprintln!("  {} lookup ./d1.yomidict,./d2.yomidict term 読む", program);
     eprintln!("  {} lookup-random ./jmdict.yomidict 1000", program);
+    eprintln!("  {} lookup-deinflect <dictionaries> <deinflection_file> <term>", program)
 }
 
 fn convert_dictionary(dict_dir: &str, output_file: &str) -> Result<(), String> {
@@ -122,6 +131,50 @@ fn convert_dictionary(dict_dir: &str, output_file: &str) -> Result<(), String> {
         println!("\nCreated: {}", output_file);
     }
     
+    Ok(())
+}
+
+fn lookup_deinflected_command(dict_files: &str, deinflection_file: &str, term: &str) -> Result<(), String> {
+    let files: Vec<&str> = dict_files.split(',').map(|s| s.trim()).collect();
+
+    println!("Loading {} dictionary/dictionaries...", files.len());
+    let mut lookups: Vec<UnifiedIndex> = files
+        .iter()
+        .map(|file| format::builder::open_package(file))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let json_content = match std::fs::read_to_string(deinflection_file) {
+        Ok(content) => content,
+        Err(e) => {
+            eprintln!("Error reading file '{}': {}", deinflection_file, e);
+            std::process::exit(1);
+        }
+    };
+
+    let transforms = match deinflect::TransformSet::from_json(&json_content) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("Error parsing JSON: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    println!("Deinflecting: {}\n", term);
+
+    let results = transforms.deinflect(term);
+
+    if results.is_empty() {
+        println!("No deinflections found.");
+        return Ok(());
+    }
+
+    for (i, result) in results.iter().enumerate() {
+        println!("Attempt: {:?}", result);
+        for (idx, lookup) in lookups.iter_mut().enumerate() {
+            print_results(&lookup.query::<Term>(&result.term));
+        }
+    }
+
     Ok(())
 }
 
