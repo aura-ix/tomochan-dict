@@ -3,6 +3,7 @@ use std::collections::HashMap;
 
 const DEPTH_LIMIT: u32 = 10;
 
+// TODO: move the input to the schema crate, convert deconjugator to FST
 // TODO: convert this to a more efficient binary format, prove graph is acyclic
 // TODO: a lot of performance in both speed and memory usage left on the table here
 // TODO: validate using rules from yomitan dictionary, seems like we can just match with condition names

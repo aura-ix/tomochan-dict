@@ -1,16 +1,17 @@
 use super::types::{QueryKindKey, Queryable};
 use super::store::UnifiedStore;
 use fst::{Map, MapBuilder, IntoStreamer, Streamer};
-use std::collections::HashMap;
 
 pub struct UnifiedFstIndex {
     fst_map: Map<Vec<u8>>,
 }
 
+// TODO: reverse index keys for faster deinflection lookups
 impl UnifiedFstIndex {
-    fn make_composite_key(data_type: QueryKindKey, key: &str, index: u64) -> Vec<u8> {
+    fn make_composite_key(data_type: QueryKindKey, key: &str, index: u8) -> Vec<u8> {
         let mut composite = Vec::new();
         composite.push(data_type.as_byte());
+        // TODO: use more compact text encoding if we don't end up decoupling FSTs
         composite.extend_from_slice(key.as_bytes());
         composite.push(0);
         composite.extend_from_slice(&index.to_le_bytes());
@@ -30,25 +31,22 @@ impl UnifiedFstIndex {
         }
     }
 
-    pub fn build(typed_mappings: Vec<(QueryKindKey, HashMap<String, Vec<u64>>)>) -> Result<Self, String> {
-        let mut all_entries: Vec<(Vec<u8>, u64)> = Vec::new();
-        
-        for (data_type, key_to_ids) in typed_mappings {
-            for (key, ids) in key_to_ids.iter() {
-                for (index, &id) in ids.iter().enumerate() {
-                    let composite_key = Self::make_composite_key(data_type, key, index as u64);
-                    all_entries.push((composite_key, id));
-                }
-            }
-        }
-
-        all_entries.sort_by(|a, b| a.0.cmp(&b.0));
+    pub fn build(mut mappings: Vec<(QueryKindKey, String, u64)>) -> Result<Self, String> {
+        mappings.sort_by(|a, b| (a.0, &a.1, a.2.to_le_bytes()).cmp(&(b.0, &b.1, b.2.to_le_bytes())));
 
         let mut fst_builder = MapBuilder::memory();
-        
-        for (key, id) in all_entries {
-            fst_builder.insert(&key, id)
-                .map_err(|e| format!("Failed to insert key into FST: {}", e))?;
+        let mut prev: Option<(QueryKindKey, &str)> = None;
+        let mut reps = 0;
+        for (kind, key, offset) in &mappings {
+            if prev != Some((*kind, key)) {
+                reps = 0;
+            }
+            fst_builder.insert(
+                &Self::make_composite_key(*kind, key, reps),
+                *offset,
+            ).map_err(|e| format!("Failed to insert key into FST: {} {:#?} {:#?}", e, prev, key))?;
+            prev = Some((*kind, key));
+            reps += 1;
         }
 
         let fst_bytes = fst_builder.into_inner()
@@ -116,34 +114,5 @@ impl UnifiedFstIndex {
         }
         
         keys
-    }
-}
-
-pub struct UnifiedIndex {
-    fst: UnifiedFstIndex,
-    store: UnifiedStore,
-}
-
-impl UnifiedIndex {
-    pub fn new(fst: UnifiedFstIndex, store: UnifiedStore) -> Self {
-        Self { fst, store }
-    }
-
-    pub fn query<T: bincode::Decode<()> + Queryable>(&mut self, key: &str) -> Vec<T> {
-        self.fst.lookup(T::KIND, key)
-            .into_iter()
-            .filter_map(|id| self.store.get::<T>(id).ok())
-            .collect() // TODO: handle errors
-    }
-
-    pub fn query_file(&mut self, key: &str) -> Option<Vec<u8>> {
-        self.fst.lookup(QueryKindKey::File, key)
-            .into_iter()
-            .filter_map(|id| self.store.get::<Vec<u8>>(id).ok())
-            .next() // TODO: handle errors
-    }
-    // TODO:replace with a generic method
-    pub fn term_keys(&self) -> Vec<String> {
-        self.fst.keys(QueryKindKey::Term)
     }
 }
