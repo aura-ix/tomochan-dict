@@ -1,20 +1,17 @@
-use super::types::{QueryKindKey, Queryable};
-use super::store::UnifiedStore;
+use super::types::QueryKindKey;
 use fst::{Map, MapBuilder, IntoStreamer, Streamer};
 
 pub struct UnifiedFstIndex {
     fst_map: Map<Vec<u8>>,
 }
 
-// TODO: reverse index keys for faster deinflection lookups
 impl UnifiedFstIndex {
-    fn make_composite_key(data_type: QueryKindKey, key: &str, index: u8) -> Vec<u8> {
+    fn make_composite_key(data_type: QueryKindKey, key: &str, index: u32) -> Vec<u8> {
         let mut composite = Vec::new();
         composite.push(data_type.as_byte());
-        // TODO: use more compact text encoding if we don't end up decoupling FSTs
         composite.extend_from_slice(key.as_bytes());
         composite.push(0);
-        composite.extend_from_slice(&index.to_le_bytes());
+        composite.extend_from_slice(&index.to_be_bytes());
         composite
     }
 
@@ -32,11 +29,11 @@ impl UnifiedFstIndex {
     }
 
     pub fn build(mut mappings: Vec<(QueryKindKey, String, u64)>) -> Result<Self, String> {
-        mappings.sort_by(|a, b| (a.0, &a.1, a.2.to_le_bytes()).cmp(&(b.0, &b.1, b.2.to_le_bytes())));
+        mappings.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
 
         let mut fst_builder = MapBuilder::memory();
         let mut prev: Option<(QueryKindKey, &str)> = None;
-        let mut reps = 0;
+        let mut reps: u32 = 0;
         for (kind, key, offset) in &mappings {
             if prev != Some((*kind, key)) {
                 reps = 0;
@@ -44,7 +41,7 @@ impl UnifiedFstIndex {
             fst_builder.insert(
                 &Self::make_composite_key(*kind, key, reps),
                 *offset,
-            ).map_err(|e| format!("Failed to insert key into FST: {} {:#?} {:#?}", e, prev, key))?;
+            ).map_err(|e| format!("Failed to insert key into FST: {} {:#?} {:#?} {} {:#?}", e, prev, (kind, key), reps, &Self::make_composite_key(*kind, key, reps)))?;
             prev = Some((*kind, key));
             reps += 1;
         }

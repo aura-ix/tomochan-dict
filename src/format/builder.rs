@@ -1,16 +1,17 @@
 use super::store::UnifiedStoreBuilder;
 use super::types::{Queryable, QueryKindKey};
 use super::index::{UnifiedFstIndex};
-use super::container::{ContainerHeader, write_container};
-use crate::schema::{Dictionary, BINCODE_CONFIG};
+use super::container::{ContainerFileInfo, ContainerHeader, write_container};
+use crate::schema::{Term, Tag, Kanji, KanjiMeta, TermMeta, BINCODE_CONFIG};
+use crate::schema::JsonParseable;
 use std::fs;
 use std::fs::File;
+use std::path::Path;
 use bincode::{Encode, Decode};
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 
 // TODO: mmap fst
 // TODO: fix error handling
-// TODO: avoid compressing files that are already compressed
 
 #[derive(Encode, Decode)]
 pub struct DictionaryPackage {
@@ -41,14 +42,17 @@ impl DictionaryPackage {
     
     pub fn load_path(path: &str) -> Result<Self, String> {
         // TODO: validate entire length is read
-        // TODO: update to use container
-        let data = std::fs::read(path)
+        let mut file = File::open(path)
             .map_err(|e| format!("Failed to read package file: {}", e))?;
+
+        // TODO: check appropriate version
+        let container = ContainerFileInfo::read_container(&mut file)
+            .map_err(|e| format!("Container error: {}", e))?;
         
-        let (package, _) = bincode::decode_from_slice(&data, BINCODE_CONFIG)
-            .map_err(|e| format!("Failed to decode package: {}", e))?;
-        
-        Ok(package)
+        file.seek(SeekFrom::Start(container.payload_offset))
+            .map_err(|e| format!("Failed to seek to dictionary contents: {}", e))?;
+
+        Self::load_reader(&mut file)
     }
 }
 
@@ -95,32 +99,44 @@ fn import_files(
     Ok(())
 }
 
-fn import_items<T>(
-    items: &[T],
-    store: &mut UnifiedStoreBuilder,
-    mapping: &mut Vec<(QueryKindKey, String, u64)>,
-) -> Result<(), String>
+pub fn load_typed_banks<P, T>(dir: P, prefix: &str, type_name: &str, store: &mut UnifiedStoreBuilder,
+    mapping: &mut Vec<(QueryKindKey, String, u64)>,) -> Result<(), String>
 where
-    T: Queryable + bincode::Encode,
+    P: AsRef<Path>,
+    T: JsonParseable + Queryable + bincode::Encode,
 {
-    for item in items {
-        mapping.push((T::KIND, item.key(), store.insert(&item)?));
-    }
+    for i in 1.. {
+        let file = dir.as_ref().join(format!("{}{}.json", prefix, i));
+        if !file.exists() { break; }
 
+        let content = fs::read_to_string(&file)
+            .map_err(|e| format!("Failed to read {}: {}", file.display(), e))?;
+
+        let arr = serde_json::from_str::<Vec<serde_json::Value>>(&content)
+            .map_err(|e| format!("Failed to parse {}: {}", file.display(), e))?;
+
+        for item in arr.iter() {
+            let item_arr = item.as_array()
+                .ok_or(format!("{} entry must be an array", type_name))?;
+
+            let elem = T::from_json_array(item_arr)?;
+            mapping.push((T::KIND, elem.key(), store.insert(&elem)?));
+        }
+    }
     Ok(())
 }
 
 pub fn convert_yomitan_dictionary(dir: &str) -> Result<DictionaryPackage, String> {
     let mut mapping: Vec<(QueryKindKey, String, u64)> = Vec::new();
     let mut store = UnifiedStoreBuilder::new()?;
-    // TODO: dictionary::from_directory implementation should probably live here and not in schema
-    let dictionary = Dictionary::from_directory(dir)?;
 
-    import_items(&dictionary.terms, &mut store, &mut mapping)?;
-    import_items(&dictionary.kanji, &mut store, &mut mapping)?;
-    import_items(&dictionary.tags, &mut store, &mut mapping)?;
-    import_items(&dictionary.term_meta, &mut store, &mut mapping)?;
-    import_items(&dictionary.kanji_meta, &mut store, &mut mapping)?;
+    // TODO: why does dict 08/09 have so many empty keys? need to look into fixing importer
+
+    load_typed_banks::<&str, Term>(dir, "term_bank_", "Term", &mut store, &mut mapping)?;
+    load_typed_banks::<&str, Kanji>(dir, "kanji_bank_", "Kanji", &mut store, &mut mapping)?;
+    load_typed_banks::<&str, Tag>(dir, "tag_bank_", "Tag", &mut store, &mut mapping)?;
+    load_typed_banks::<&str, TermMeta>(dir, "term_meta_bank_", "Term meta", &mut store, &mut mapping)?;
+    load_typed_banks::<&str, KanjiMeta>(dir, "kanji_meta_bank_", "Kanji meta", &mut store, &mut mapping)?;
     import_files(dir, dir, &mut store, &mut mapping)?;
 
     Ok(DictionaryPackage {

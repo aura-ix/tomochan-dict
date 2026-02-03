@@ -1,6 +1,9 @@
 use clap::{Parser, Subcommand};
+use fastbloom::BloomFilter;
+use foldhash::fast::RandomState;
 use std::fs::File;
 use std::io::{Seek, SeekFrom};
+use std::time::Instant;
 
 mod schema;
 mod format;
@@ -9,10 +12,11 @@ mod deinflect;
 use format::{DictionaryPackage, convert_yomitan_dictionary};
 use format::types::QueryKindKey;
 use format::index::UnifiedFstIndex;
-use format::store::UnifiedStore;
 use format::container::{ContainerFileInfo, ContainerHeader, Role};
 
 type CliResult = Result<(), Box<dyn std::error::Error>>;
+
+// TODO: API that is simple "jp string to HTML" interface
 
 #[derive(Parser)]
 struct Cli {
@@ -70,20 +74,76 @@ impl Execute for ConvertCommand {
 }
 
 #[derive(Parser)]
-struct LookupCommand {
-    #[arg(long)]
-    dict: String,
+pub struct LookupCommand {
+    pub word: String,
 
-    #[arg(long)]
-    kind: String,
+    #[arg(required = true)]
+    pub dictionaries: Vec<String>,
 
-    #[arg(long)]
-    key: String,
+    #[arg(long = "deinflection-rules")]
+    pub deinflection_rules: Option<String>,
 }
 
 impl Execute for LookupCommand {
     fn execute(&self) -> CliResult {
-        // TODO
+        let dicts: Vec<UnifiedFstIndex> = self.dictionaries
+            .iter()
+            .map(|file| UnifiedFstIndex::from_bytes(DictionaryPackage::load_path(file)?.fst))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // TODO: make filter optional and storeable
+        println!("building filter");
+        let mut keycount = 0;
+        for dict in &dicts {
+            keycount += dict.keys(QueryKindKey::Term).len();
+        }
+
+        // TODO: key iterator
+        let mut filter = BloomFilter::with_num_bits(5 * 1024 * 1024 * 8).hasher(RandomState::default()).expected_items(keycount);
+        for dict in &dicts {
+            for key in dict.keys(QueryKindKey::Term) {
+                filter.insert(&key);
+            }
+        }
+        println!("built filter");
+
+        let mut terms = Vec::new();
+
+        if let Some(deinflection_rules) = &self.deinflection_rules {
+            let json_content = std::fs::read_to_string(deinflection_rules)?;
+
+            let transforms = deinflect::TransformSet::from_json(&json_content)?;
+
+            let deinflector = deinflect::Deinflector::make(transforms.clone())?;
+
+            let start = Instant::now();
+            let results = deinflector.deinflect(&self.word);
+            for result in &results {
+                if filter.contains(&result.term) {
+                    terms.push(result.term.clone());
+                }
+            }
+            let elapsed = start.elapsed();
+
+            println!("{:?} deinflection", elapsed);
+            println!("{} terms from deinflection, {} post-filtering", results.len(), terms.len());
+    
+        } else {
+            terms.push(self.word.clone());
+        }
+
+        let start = Instant::now();
+        let mut result_count = 0;
+        for dict in &dicts {
+            for term in &terms {
+                result_count += dict.lookup(QueryKindKey::Term, term).len();
+            }
+        }
+        let elapsed = start.elapsed();
+
+        println!("filtered term count {}", terms.len());
+        println!("{:?} lookup", elapsed);
+        println!("{} results", result_count);
 
         Ok(())
     }
@@ -104,6 +164,7 @@ impl Execute for ProbeCommand {
         match container.header.role {
             Role::Dictionary => {
                 file.seek(SeekFrom::Start(container.payload_offset))?;
+                // TODO: we need to check the version is appropriate
                 let package = DictionaryPackage::load_reader(&mut file)?;
 
                 println!("\nFST size: {} KB", package.fst.len()/1024);

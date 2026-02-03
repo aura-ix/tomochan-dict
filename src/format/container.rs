@@ -9,6 +9,7 @@
 //! A JSON serialization of a ContainerHeader follows the magic header in the
 //! current version.
 
+// TODO: license info in repo
 // TODO: separate out user specifiable part of container header, then the code that writes the format will file in role info, and this code will fill in container version info
 // TODO: keep track of supported role versions in the code
 // TODO: implement dev versions properly
