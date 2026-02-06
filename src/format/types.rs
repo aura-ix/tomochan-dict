@@ -16,15 +16,15 @@ impl QueryKindKey {
         self as u8
     }
     
-    pub fn from_byte(byte: u8) -> Option<Self> {
+    pub fn from_byte(byte: u8) -> Result<Self, String> {
         match byte {
-            0x00 => Some(QueryKindKey::Term),
-            0x01 => Some(QueryKindKey::Kanji),
-            0x02 => Some(QueryKindKey::Tag),
-            0x03 => Some(QueryKindKey::TermMeta),
-            0x04 => Some(QueryKindKey::KanjiMeta),
-            0x05 => Some(QueryKindKey::File),
-            _ => None,
+            0x00 => Ok(QueryKindKey::Term),
+            0x01 => Ok(QueryKindKey::Kanji),
+            0x02 => Ok(QueryKindKey::Tag),
+            0x03 => Ok(QueryKindKey::TermMeta),
+            0x04 => Ok(QueryKindKey::KanjiMeta),
+            0x05 => Ok(QueryKindKey::File),
+            _ => Err("invalid key byte".to_string()),
         }
     }
 }

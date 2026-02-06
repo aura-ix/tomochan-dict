@@ -13,3 +13,4 @@ sha2 = "0.10.9"
 clap = { version = "4", features = ["derive"] }
 fastbloom = "0.14.1"
 foldhash = "0.2.0"
+memmap2 = "0.9.9"

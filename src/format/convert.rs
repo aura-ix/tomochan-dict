@@ -1,65 +1,20 @@
-use super::store::UnifiedStoreBuilder;
+use super::store::StoreBuilder;
 use super::types::{Queryable, QueryKindKey};
-use super::index::{UnifiedFstIndex};
-use super::container::{ContainerFileInfo, ContainerHeader, write_container};
+use super::index::DictionaryIndex;
+use super::container::{ContainerHeader, write_container};
+use super::dictionary::DictionaryHeader;
 use crate::schema::{Term, Tag, Kanji, KanjiMeta, TermMeta, BINCODE_CONFIG};
 use crate::schema::JsonParseable;
 use std::fs;
 use std::fs::File;
 use std::path::Path;
-use bincode::{Encode, Decode};
-use std::io::{Read, Seek, SeekFrom};
 
-// TODO: mmap fst
-// TODO: fix error handling
-
-#[derive(Encode, Decode)]
-pub struct DictionaryPackage {
-    pub fst: Vec<u8>,
-    pub data: Vec<u8>,
-}
-
-impl DictionaryPackage {
-    pub fn save(&self, path: &str, header: ContainerHeader) -> Result<(), String> {
-        let encoded = bincode::encode_to_vec(self, BINCODE_CONFIG)
-            .map_err(|e| format!("Failed to encode package: {}", e))?;
-        
-        let mut file = File::create(path)
-            .map_err(|e| format!("Failed to open package file: {}", e))?;
-        write_container(&mut file, header, &encoded)
-            .map_err(|e| format!("Failed to write package file: {}", e))?;
-            
-        Ok(())
-    }
-
-    pub fn load_reader<R: Read>(reader: &mut R) -> Result<Self, String> {
-        // TODO: validate entire length is read
-        let package: Self = bincode::decode_from_std_read(reader, BINCODE_CONFIG)
-            .map_err(|e| format!("Failed to decode package: {}", e))?;
-
-        Ok(package)
-    }
-    
-    pub fn load_path(path: &str) -> Result<Self, String> {
-        // TODO: validate entire length is read
-        let mut file = File::open(path)
-            .map_err(|e| format!("Failed to read package file: {}", e))?;
-
-        // TODO: check appropriate version
-        let container = ContainerFileInfo::read_container(&mut file)
-            .map_err(|e| format!("Container error: {}", e))?;
-        
-        file.seek(SeekFrom::Start(container.payload_offset))
-            .map_err(|e| format!("Failed to seek to dictionary contents: {}", e))?;
-
-        Self::load_reader(&mut file)
-    }
-}
+// TODO: fix error handling throughout codebase
 
 fn import_files(
     base_dir: &str,
     current_dir: &str,
-    store: &mut UnifiedStoreBuilder,
+    store: &mut StoreBuilder,
     mapping: &mut Vec<(QueryKindKey, String, u64)>,
 ) -> Result<(), String> {
     let entries = std::fs::read_dir(current_dir)
@@ -99,7 +54,7 @@ fn import_files(
     Ok(())
 }
 
-pub fn load_typed_banks<P, T>(dir: P, prefix: &str, type_name: &str, store: &mut UnifiedStoreBuilder,
+pub fn load_typed_banks<P, T>(dir: P, prefix: &str, type_name: &str, store: &mut StoreBuilder,
     mapping: &mut Vec<(QueryKindKey, String, u64)>,) -> Result<(), String>
 where
     P: AsRef<Path>,
@@ -126,21 +81,38 @@ where
     Ok(())
 }
 
-pub fn convert_yomitan_dictionary(dir: &str) -> Result<DictionaryPackage, String> {
+pub fn convert_yomitan_dictionary(src_dir: &str, dst: &str, header: ContainerHeader) -> Result<(), String> {
     let mut mapping: Vec<(QueryKindKey, String, u64)> = Vec::new();
-    let mut store = UnifiedStoreBuilder::new()?;
+    let mut store = StoreBuilder::new()?;
 
     // TODO: why does dict 08/09 have so many empty keys? need to look into fixing importer
 
-    load_typed_banks::<&str, Term>(dir, "term_bank_", "Term", &mut store, &mut mapping)?;
-    load_typed_banks::<&str, Kanji>(dir, "kanji_bank_", "Kanji", &mut store, &mut mapping)?;
-    load_typed_banks::<&str, Tag>(dir, "tag_bank_", "Tag", &mut store, &mut mapping)?;
-    load_typed_banks::<&str, TermMeta>(dir, "term_meta_bank_", "Term meta", &mut store, &mut mapping)?;
-    load_typed_banks::<&str, KanjiMeta>(dir, "kanji_meta_bank_", "Kanji meta", &mut store, &mut mapping)?;
-    import_files(dir, dir, &mut store, &mut mapping)?;
+    load_typed_banks::<&str, Term>(src_dir, "term_bank_", "Term", &mut store, &mut mapping)?;
+    load_typed_banks::<&str, Kanji>(src_dir, "kanji_bank_", "Kanji", &mut store, &mut mapping)?;
+    load_typed_banks::<&str, Tag>(src_dir, "tag_bank_", "Tag", &mut store, &mut mapping)?;
+    load_typed_banks::<&str, TermMeta>(src_dir, "term_meta_bank_", "Term meta", &mut store, &mut mapping)?;
+    load_typed_banks::<&str, KanjiMeta>(src_dir, "kanji_meta_bank_", "Kanji meta", &mut store, &mut mapping)?;
+    import_files(src_dir, src_dir, &mut store, &mut mapping)?;
 
-    Ok(DictionaryPackage {
-        fst: UnifiedFstIndex::build(mapping)?.as_bytes().to_vec(),
-        data: store.finalize()?,
-    })
+    let fst = DictionaryIndex::build(mapping)?.as_bytes().to_vec();
+    let store = store.finalize()?;
+
+    let mut encoded: Vec<u8> = bincode::encode_to_vec(
+        DictionaryHeader {
+            fst_len: fst.len() as u64,
+            store_len: store.len() as u64,
+        },
+        BINCODE_CONFIG
+    ).map_err(|e| format!("Failed to encode package: {}", e))?;
+
+    encoded.extend(fst);
+    encoded.extend(store);
+    
+    let mut file = File::create(dst)
+        .map_err(|e| format!("Failed to open package file: {}", e))?;
+
+    write_container(&mut file, header, &encoded)
+        .map_err(|e| format!("Failed to write package file: {}", e))?;
+
+    Ok(())
 }

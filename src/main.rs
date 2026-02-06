@@ -1,18 +1,15 @@
 use clap::{Parser, Subcommand};
-use fastbloom::BloomFilter;
-use foldhash::fast::RandomState;
 use std::fs::File;
-use std::io::{Seek, SeekFrom};
 use std::time::Instant;
 
 mod schema;
 mod format;
 mod deinflect;
 
-use format::{DictionaryPackage, convert_yomitan_dictionary};
+use format::convert_yomitan_dictionary;
+use format::Dictionary;
 use format::types::QueryKindKey;
-use format::index::UnifiedFstIndex;
-use format::container::{ContainerFileInfo, ContainerHeader, Role};
+use format::container::{ContainerFileInfo, ContainerHeader, Role, open_container, allow_dev_version};
 
 type CliResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -57,8 +54,8 @@ struct ConvertCommand {
 
 impl Execute for ConvertCommand {
     fn execute(&self) -> CliResult {
-        let package = convert_yomitan_dictionary(&self.input)?;
-        package.save(
+        Ok(convert_yomitan_dictionary(
+            &self.input,
             &self.output,
             ContainerHeader::new(
                 self.name.clone(),
@@ -67,9 +64,7 @@ impl Execute for ConvertCommand {
                 Role::Dictionary,
                 0,
             ),
-        )?;
-
-        Ok(())
+        )?)
     }
 }
 
@@ -86,26 +81,11 @@ pub struct LookupCommand {
 
 impl Execute for LookupCommand {
     fn execute(&self) -> CliResult {
-        let dicts: Vec<UnifiedFstIndex> = self.dictionaries
+        // TODO: just .map, more concise, need to incl store though
+        let dicts: Vec<Dictionary> = self.dictionaries
             .iter()
-            .map(|file| UnifiedFstIndex::from_bytes(DictionaryPackage::load_path(file)?.fst))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        // TODO: make filter optional and storeable
-        println!("building filter");
-        let mut keycount = 0;
-        for dict in &dicts {
-            keycount += dict.keys(QueryKindKey::Term).len();
-        }
-
-        // TODO: key iterator
-        let mut filter = BloomFilter::with_num_bits(5 * 1024 * 1024 * 8).hasher(RandomState::default()).expected_items(keycount);
-        for dict in &dicts {
-            for key in dict.keys(QueryKindKey::Term) {
-                filter.insert(&key);
-            }
-        }
-        println!("built filter");
+            .map(|path| open_container::<Dictionary>(path, true))
+            .collect::<Result<_, _>>()?;
 
         let mut terms = Vec::new();
 
@@ -119,9 +99,7 @@ impl Execute for LookupCommand {
             let start = Instant::now();
             let results = deinflector.deinflect(&self.word);
             for result in &results {
-                if filter.contains(&result.term) {
-                    terms.push(result.term.clone());
-                }
+                terms.push(result.term.clone());
             }
             let elapsed = start.elapsed();
 
@@ -136,7 +114,7 @@ impl Execute for LookupCommand {
         let mut result_count = 0;
         for dict in &dicts {
             for term in &terms {
-                result_count += dict.lookup(QueryKindKey::Term, term).len();
+                result_count += dict.index.lookup(QueryKindKey::Term, term).len();
             }
         }
         let elapsed = start.elapsed();
@@ -157,18 +135,17 @@ struct ProbeCommand {
 
 impl Execute for ProbeCommand {
     fn execute(&self) -> CliResult {
-        let mut file = File::open(self.path.clone())?;
+        let file = File::open(self.path.clone())?;
         let container = ContainerFileInfo::read_container(&file)?;
         println!("{:#?}", container.header);
 
         match container.header.role {
             Role::Dictionary => {
-                file.seek(SeekFrom::Start(container.payload_offset))?;
-                // TODO: we need to check the version is appropriate
-                let package = DictionaryPackage::load_reader(&mut file)?;
+                let dict = open_container::<Dictionary>(&self.path, true)?;
 
-                println!("\nFST size: {} KB", package.fst.len()/1024);
-                let fst = UnifiedFstIndex::from_bytes(package.fst)?;
+                // TODO: reimpl size stats
+                // println!("\nFST size: {} KB", dict.index.len()/1024);
+                // println!("\nStore size: {} KB", dict.index.data.len()/1024);
 
                 let key_kinds = [
                     (QueryKindKey::Term, "term"),
@@ -180,10 +157,9 @@ impl Execute for ProbeCommand {
                 ];
 
                 for key_kind in &key_kinds {
-                    println!("  {} {} entries", fst.keys(key_kind.0).len(), key_kind.1);
+                    println!("  {} {} entries", dict.index.keys(key_kind.0).len(), key_kind.1);
                 }
 
-                println!("\nStore size: {} KB", package.data.len()/1024);
                 // TODO: per key information about store using compressed size
                 // need to get all keys, sort by offset, then extract size between keys
             }
@@ -195,6 +171,10 @@ impl Execute for ProbeCommand {
 }
 
 fn main() {
+    allow_dev_version(std::env::var("TOMOCHAN_DEV")
+        .map(|v| v.len() > 0)
+        .unwrap_or(false));
+
     let cli = Cli::parse();
 
     let result = match cli.command {

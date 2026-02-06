@@ -11,8 +11,6 @@
 
 // TODO: license info in repo
 // TODO: separate out user specifiable part of container header, then the code that writes the format will file in role info, and this code will fill in container version info
-// TODO: keep track of supported role versions in the code
-// TODO: implement dev versions properly
 // TODO: repo features
 // TODO: look into validating file formats to be able to do non-validated lookups, just checking the file hash
 
@@ -20,17 +18,41 @@ use std::io::{self, Write, Read, Seek, SeekFrom};
 use serde::{Serialize, Deserialize};
 use serde_json::de::Deserializer;
 use sha2::{Sha256, Digest};
+use std::fs::File;
+use std::fmt;
+use std::fmt::Display;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const CURRENT_HEADER_VERSION: u16 = 0;
 const CURRENT_CONTAINER_VERSION: u64 = 0;
 const MIN_COMPATIBLE_HEADER_VERSION: u16 = 0;
 
-#[derive(Debug, Serialize, Deserialize)]
+static ALLOW_DEV_VERSION: AtomicBool = AtomicBool::new(false);
+
+pub fn dev_version_allowed() -> bool {
+    ALLOW_DEV_VERSION.load(Ordering::Relaxed)
+}
+
+pub fn allow_dev_version(enabled: bool) {
+    ALLOW_DEV_VERSION.store(enabled, Ordering::Relaxed);
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Role {
     Dictionary,
     DeconjugationRuleset,
-    // TODO: implement serde of this properly
+    #[serde(untagged)]
     Unknown(String),
+}
+
+impl Display for Role {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Role::Dictionary => write!(f, "Dictionary"),
+            Role::DeconjugationRuleset => write!(f, "Deconjugation ruleset"),
+            Role::Unknown(s) => write!(f, "Unknown ({})", s),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -72,6 +94,12 @@ impl ContainerHeader {
     }
 }
 
+pub struct OpenContainer<R: Read + Seek> {
+    pub header: ContainerHeader,
+    pub payload_offset: u64,
+    pub stream: R,
+}
+
 pub struct ContainerFileInfo {
     pub header: ContainerHeader,
     pub payload_offset: u64,
@@ -108,7 +136,6 @@ impl ContainerFileInfo {
     }
 
     pub fn validate_payload<R: Read + Seek>(&self, mut reader: R) -> io::Result<()> {
-        // TODO: stream_len method
         reader.seek(SeekFrom::Start(self.payload_offset))?;
         let eof = reader.seek(SeekFrom::End(0))?;
         let actual_length = eof
@@ -158,10 +185,44 @@ pub fn write_container<W: Write>(
     let header_json = serde_json::to_vec(&header)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("JSON serialization error: {}", e)))?;
 
-
     writer.write_all(format!("TOMOCHAN:{:04X}:", CURRENT_HEADER_VERSION).as_bytes())?;
     writer.write_all(&header_json)?;
     writer.write_all(data)?;
 
     Ok(())
+}
+
+pub trait ContainerFormat: Sized {
+    fn role() -> Role;
+    fn min_role_version() -> u64;
+    fn role_version() -> u64;
+
+    // TODO: store verification <-> hash in .hashlog file, still use tomochan wrapper?
+    // hashlog file needs to use the hash of the entire file, not the sha256 inside. maybe the sha256 needs to go at the end?
+    fn load(path: &str, payload_offset: u64, verify: bool) -> Result<Self, String>;
+}
+
+// TODO: should probably expose the header somehow
+pub fn open_container<T: ContainerFormat>(path: &str, verify: bool) -> Result<T, String> {
+    let file = File::open(path)
+        .map_err(|e| format!("Failed to read package file: {}", e))?;
+
+    let container = ContainerFileInfo::read_container(file)
+        .map_err(|e| format!("Error opening container: {}", e))?;
+
+    if container.header.role != T::role() {
+        return Err(format!("container role is different than expected: {} {}", container.header.role, T::role()));
+    }
+
+    if container.header.min_role_version > T::role_version() {
+        return Err("container role format too new".to_string());
+    }
+
+    if container.header.min_role_version == 0 && !dev_version_allowed() {
+        return Err("package is a development version".to_string());
+    }
+
+    // TODO: sha256 when verify
+
+    T::load(path, container.payload_offset, verify)
 }

@@ -2,7 +2,7 @@ use crate::schema::BINCODE_CONFIG;
 use std::cell::RefCell;
 use std::io::Write;
 use std::rc::Rc;
-use zeekstd::{Decoder, EncodeOptions};
+use zeekstd::{Decoder, EncodeOptions, Seekable};
 
 const ZSTD_COMPRESSION_LEVEL: i32 = 19;
 
@@ -20,19 +20,20 @@ impl Write for SharedBuffer {
     }
 }
 
-pub struct UnifiedStoreBuilder {
+pub struct StoreBuilder {
     encoder: zeekstd::Encoder<'static, SharedBuffer>,
     buffer: Rc<RefCell<Vec<u8>>>,
     current_offset: u64,
 }
 
-impl UnifiedStoreBuilder {
+impl StoreBuilder {
     pub fn new() -> Result<Self, String> {
         let buffer = Rc::new(RefCell::new(Vec::new()));
         let writer = SharedBuffer(Rc::clone(&buffer));
 
         let encoder = EncodeOptions::new()
             .compression_level(ZSTD_COMPRESSION_LEVEL)
+            // .frame_size_policy(FrameSizePolicy::Uncompressed(8192))
             .into_encoder(writer)
             .map_err(|e| format!("Failed to create Encoder: {}", e))?;
 
@@ -69,14 +70,13 @@ impl UnifiedStoreBuilder {
     }
 }
 
-pub struct UnifiedStore {
-    decoder: Decoder<'static, std::io::Cursor<Vec<u8>>>,
+pub struct Store<S: Seekable> {
+    decoder: Decoder<'static, S>,
 }
 
-impl UnifiedStore {
-    pub fn new(data: Vec<u8>) -> Result<Self, String> {
-        let cursor = std::io::Cursor::new(data);
-        let decoder = Decoder::new(cursor)
+impl<S: Seekable> Store<S> {
+    pub fn new(src: S) -> Result<Self, String> {
+        let decoder = Decoder::new(src)
             .map_err(|e| format!("Failed to create Decoder: {}", e))?;
 
         Ok(Self { decoder })

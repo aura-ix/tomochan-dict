@@ -1,11 +1,31 @@
 use super::types::QueryKindKey;
 use fst::{Map, MapBuilder, IntoStreamer, Streamer};
+use fst::map::OpBuilder;
+use std::fs::File;
+use memmap2::Mmap;
 
-pub struct UnifiedFstIndex {
-    fst_map: Map<Vec<u8>>,
+// TODO: use the fst::verify method. we probably need our format trait to have verify/read/write
+// TODO: validate all keys
+
+enum BackingStore {
+    Memory(Vec<u8>),
+    Mmap((Mmap, usize, usize)),
 }
 
-impl UnifiedFstIndex {
+impl AsRef<[u8]> for BackingStore {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            BackingStore::Memory(v) => v.as_ref(),
+            BackingStore::Mmap(m) => &m.0[m.1..m.2],
+        }
+    }
+}
+
+pub struct DictionaryIndex {
+    fst_map: Map<BackingStore>,
+}
+
+impl DictionaryIndex {
     fn make_composite_key(data_type: QueryKindKey, key: &str, index: u32) -> Vec<u8> {
         let mut composite = Vec::new();
         composite.push(data_type.as_byte());
@@ -15,17 +35,18 @@ impl UnifiedFstIndex {
         composite
     }
 
-    fn extract_key_from_composite(key: &[u8]) -> &str {
-        if key.is_empty() {
-            return "";
+    fn destructure_key(key: &[u8]) -> Result<(QueryKindKey, &str, u32), String> {
+        // TODO: we need some way to validate loaded FSTs/deinflection rulesets etc at import time
+        if key.len() < 5 {
+            return Err("malformed key".to_string());
         }
 
-        let key_bytes = &key[1..];
-        if let Some(pos) = key_bytes.iter().position(|&b| b == 0) {
-            std::str::from_utf8(&key_bytes[..pos]).unwrap_or("")
-        } else {
-            std::str::from_utf8(key_bytes).unwrap_or("")
-        }
+        let kind = QueryKindKey::from_byte(key[0])?;
+        let key_str = std::str::from_utf8(&key[1..key.len()-5])
+            .map_err(|e| format!("invalid utf8 key: {}", e))?;
+        let idx = u32::from_be_bytes(key[key.len()-4..].try_into().unwrap());
+
+        Ok((kind, key_str, idx))
     }
 
     pub fn build(mut mappings: Vec<(QueryKindKey, String, u64)>) -> Result<Self, String> {
@@ -48,7 +69,7 @@ impl UnifiedFstIndex {
 
         let fst_bytes = fst_builder.into_inner()
             .map_err(|e| format!("FST build failed: {}", e))?;
-        let fst_map = Map::new(fst_bytes)
+        let fst_map = Map::new(BackingStore::Memory(fst_bytes))
             .map_err(|e| format!("FST creation failed: {}", e))?;
 
         Ok(Self { fst_map })
@@ -59,8 +80,29 @@ impl UnifiedFstIndex {
     }
 
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, String> {
-        let fst_map = Map::new(bytes)
+        let fst_map = Map::new(BackingStore::Memory(bytes))
             .map_err(|e| format!("FST creation failed: {}", e))?;
+        Ok(Self { fst_map })
+    }
+
+    pub fn load_mmap(path: &str, offset: u64, len: u64) -> Result<Self, String> {
+        let file = File::open(path)
+            .map_err(|e| format!("Failed to open FST file: {}", e))?;
+
+        let offset: usize = offset.try_into()
+            .map_err(|_| "dictionary file too large for 32 bit platform")?;
+
+        let len: usize = offset.try_into()
+            .map_err(|_| "dictionary file too large for 32 bit platform")?;
+        
+        let mmap = unsafe { 
+            Mmap::map(&file)
+                .map_err(|e| format!("Failed to mmap file: {}", e))?
+        };
+        
+        let fst_map = Map::new(BackingStore::Mmap((mmap, offset, offset+len)))
+            .map_err(|e| format!("FST creation failed: {}", e))?;
+        
         Ok(Self { fst_map })
     }
 
@@ -79,7 +121,8 @@ impl UnifiedFstIndex {
                 break;
             }
             
-            let found_key = Self::extract_key_from_composite(composite_key);
+            // TODO: remove unwrap
+            let (_, found_key, _) = Self::destructure_key(composite_key).unwrap();
             if found_key != key {
                 break;
             }
@@ -103,13 +146,33 @@ impl UnifiedFstIndex {
                 break;
             }
             
-            let key = Self::extract_key_from_composite(composite_key).to_string();
-            if last_key.as_ref() != Some(&key) {
-                keys.push(key.clone());
-                last_key = Some(key);
+            // TODO: remove unwrap
+            let (_, key, _) = Self::destructure_key(composite_key).unwrap();
+            if last_key.as_deref() != Some(key) {
+                keys.push(key.to_string());
+                last_key = Some(key.to_string());
             }
         }
         
         keys
+    }
+
+    pub fn unique_terms_in_collection(indexes: &[DictionaryIndex]) -> Result<usize, String> {
+        let mut op = OpBuilder::new();
+        let prefix = QueryKindKey::Term.as_byte();
+        for index in indexes {
+            op.push(index.fst_map.range().ge(&[prefix]).lt(&[prefix + 1]));
+        }
+
+        let mut stream = op.union();
+        let mut count = 0;
+        while let Some((composite_key, _)) = stream.next() {
+            let (_, _, rep) = Self::destructure_key(composite_key)?;
+            if rep == 0 {
+                count += 1;
+            }
+        }
+
+        Ok(count)
     }
 }
