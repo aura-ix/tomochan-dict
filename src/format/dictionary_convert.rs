@@ -1,8 +1,8 @@
 use super::store::StoreBuilder;
 use super::types::{Queryable, QueryKindKey};
 use super::index::DictionaryIndex;
-use super::container::{ContainerHeader, write_container};
-use super::dictionary::DictionaryHeader;
+use super::container::{ContainerMeta, write_container};
+use super::dictionary::*;
 use crate::schema::{Term, Tag, Kanji, KanjiMeta, TermMeta, BINCODE_CONFIG};
 use crate::schema::JsonParseable;
 use std::fs;
@@ -81,7 +81,7 @@ where
     Ok(())
 }
 
-pub fn convert_yomitan_dictionary(src_dir: &str, dst: &str, header: ContainerHeader) -> Result<(), String> {
+pub fn convert_yomitan_dictionary(src_dir: &str, dst: &str, meta: ContainerMeta) -> Result<(), String> {
     let mut mapping: Vec<(QueryKindKey, String, u64)> = Vec::new();
     let mut store = StoreBuilder::new()?;
 
@@ -111,7 +111,7 @@ pub fn convert_yomitan_dictionary(src_dir: &str, dst: &str, header: ContainerHea
     let mut file = File::create(dst)
         .map_err(|e| format!("Failed to open package file: {}", e))?;
 
-    write_container(&mut file, header, &encoded)
+    write_container::<Dictionary, _>(&mut file, meta, &encoded)
         .map_err(|e| format!("Failed to write package file: {}", e))?;
 
     Ok(())

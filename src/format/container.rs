@@ -40,7 +40,7 @@ pub fn allow_dev_version(enabled: bool) {
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Role {
     Dictionary,
-    DeconjugationRuleset,
+    Deinflector,
     #[serde(untagged)]
     Unknown(String),
 }
@@ -49,23 +49,31 @@ impl Display for Role {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Role::Dictionary => write!(f, "Dictionary"),
-            Role::DeconjugationRuleset => write!(f, "Deconjugation ruleset"),
+            Role::Deinflector => write!(f, "Deinflector"),
             Role::Unknown(s) => write!(f, "Unknown ({})", s),
         }
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ContainerHeader {
-    /// Actual version of the container format
-    pub container_version: u64,
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ContainerMeta {
     /// User visible name (ex. Jitendex)
     pub name: String,
     /// User visible revision name (ex. 2025-01-01)
     pub revision_name: String,
     /// Internal revision number, larger is always newer.
     pub revision: u64,
+}
+
+// TODO: probably can just hide this as impl detail
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ContainerHeader {
+    /// Actual version of the container format
+    pub container_version: u64,
+
+    #[serde(flatten)]
+    pub meta: ContainerMeta,
 
     /// Kind of file
     pub role: Role,
@@ -77,21 +85,6 @@ pub struct ContainerHeader {
     // TODO: serialize as hex string
     // Hash of the data following the header
     pub payload_sha256: [u8; 32],
-}
-
-impl ContainerHeader {
-    pub fn new(name: String, revision_name: String, revision: u64, role: Role, min_role_version: u64) -> Self {
-        ContainerHeader {
-            container_version: CURRENT_CONTAINER_VERSION,
-            name: name,
-            revision_name: revision_name,
-            revision: revision,
-            role: role,
-            min_role_version: min_role_version,
-            payload_length: 0,
-            payload_sha256: [0u8; 32],
-        }
-    }
 }
 
 pub struct OpenContainer<R: Read + Seek> {
@@ -169,18 +162,24 @@ impl ContainerFileInfo {
     }
 }
 
-// NB: the sha256 and length fields are not used here, and are instead calculated by this function
-pub fn write_container<W: Write>(
+pub fn write_container<T: ContainerFormat, W: Write>(
     writer: &mut W,
-    mut header: ContainerHeader,
+    meta: ContainerMeta,
     data: &[u8],
 ) -> io::Result<()> {
     let mut hasher = Sha256::new();
     hasher.update(data);
-    let hash_result = hasher.finalize();
+    let payload_sha256 = hasher.finalize();
 
-    header.payload_length = data.len() as u64;
-    header.payload_sha256.copy_from_slice(&hash_result);
+    let header = ContainerHeader {
+        container_version: CURRENT_CONTAINER_VERSION,
+        meta,
+        role: T::role(),
+        min_role_version: T::role_version(),
+        payload_length: data.len() as u64,
+        payload_sha256: payload_sha256.into(),
+    };
+
 
     let header_json = serde_json::to_vec(&header)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("JSON serialization error: {}", e)))?;

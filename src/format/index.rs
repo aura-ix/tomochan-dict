@@ -4,8 +4,9 @@ use fst::map::OpBuilder;
 use std::fs::File;
 use memmap2::Mmap;
 
-// TODO: use the fst::verify method. we probably need our format trait to have verify/read/write
-// TODO: validate all keys
+// TODO: fsts traversal can panic at any point, there is no way to
+// realistically validate the structure, so we will probably need to spawn a
+// separate process for it long term unless catch unwind is usable
 
 enum BackingStore {
     Memory(Vec<u8>),
@@ -36,7 +37,6 @@ impl DictionaryIndex {
     }
 
     fn destructure_key(key: &[u8]) -> Result<(QueryKindKey, &str, u32), String> {
-        // TODO: we need some way to validate loaded FSTs/deinflection rulesets etc at import time
         if key.len() < 5 {
             return Err("malformed key".to_string());
         }
@@ -92,7 +92,7 @@ impl DictionaryIndex {
         let offset: usize = offset.try_into()
             .map_err(|_| "dictionary file too large for 32 bit platform")?;
 
-        let len: usize = offset.try_into()
+        let len: usize = len.try_into()
             .map_err(|_| "dictionary file too large for 32 bit platform")?;
         
         let mmap = unsafe { 
@@ -121,7 +121,7 @@ impl DictionaryIndex {
                 break;
             }
             
-            // TODO: remove unwrap
+            // unwrap is ok b/c checked by verify
             let (_, found_key, _) = Self::destructure_key(composite_key).unwrap();
             if found_key != key {
                 break;
@@ -146,7 +146,7 @@ impl DictionaryIndex {
                 break;
             }
             
-            // TODO: remove unwrap
+            // unwrap is ok b/c checked by verify
             let (_, key, _) = Self::destructure_key(composite_key).unwrap();
             if last_key.as_deref() != Some(key) {
                 keys.push(key.to_string());
@@ -174,5 +174,20 @@ impl DictionaryIndex {
         }
 
         Ok(count)
+    }
+
+    pub fn verify(&self) -> Result<(), String> {
+        let mut stream = self.fst_map.stream();
+
+        // probably extraneous because this only checks that the checksum is intact, but whatever
+        map.as_fst().verify()
+            .map_err(|e| format!("fst verification failed: {}", e))?;
+
+        // TODO: verify value, not just key
+        while let Some((key, _)) = stream.next() {
+            Self::destructure_key(&key)?;
+        }
+
+        Ok(())
     }
 }

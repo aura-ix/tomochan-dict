@@ -1,15 +1,13 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::fs::File;
 use std::time::Instant;
 
 mod schema;
 mod format;
-mod deinflect;
 
-use format::convert_yomitan_dictionary;
-use format::Dictionary;
+use format::{Dictionary, Deinflector, convert_yomitan_dictionary, convert_deinflector};
 use format::types::QueryKindKey;
-use format::container::{ContainerFileInfo, ContainerHeader, Role, open_container, allow_dev_version};
+use format::container::{ContainerMeta, ContainerFileInfo, Role, open_container, allow_dev_version};
 
 type CliResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -32,6 +30,12 @@ trait Execute {
     fn execute(&self) -> CliResult;
 }
 
+#[derive(Clone, ValueEnum)]
+enum ConvertKind {
+    Dict,
+    Deinflector
+}
+
 // TODO: autofill revision and revision_name with dev if not specified
 // TODO: option to use current utc timestamp as revision?
 #[derive(Parser)]
@@ -46,6 +50,9 @@ struct ConvertCommand {
     name: String,
 
     #[arg(long)]
+    kind: ConvertKind,
+
+    #[arg(long)]
     revision_name: String,
 
     #[arg(long)]
@@ -54,17 +61,24 @@ struct ConvertCommand {
 
 impl Execute for ConvertCommand {
     fn execute(&self) -> CliResult {
-        Ok(convert_yomitan_dictionary(
-            &self.input,
-            &self.output,
-            ContainerHeader::new(
-                self.name.clone(),
-                self.revision_name.clone(),
-                self.revision,
-                Role::Dictionary,
-                0,
-            ),
-        )?)
+        let meta = ContainerMeta {
+            name: self.name.clone(),
+            revision_name: self.revision_name.clone(),
+            revision: self.revision,
+        };
+
+        match self.kind {
+            ConvertKind::Dict => Ok(convert_yomitan_dictionary(
+                &self.input,
+                &self.output,
+                meta,
+            )?),
+            ConvertKind::Deinflector => Ok(convert_deinflector(
+                &self.input,
+                &self.output,
+                meta,
+            )?),
+        }
     }
 }
 
@@ -75,8 +89,8 @@ pub struct LookupCommand {
     #[arg(required = true)]
     pub dictionaries: Vec<String>,
 
-    #[arg(long = "deinflection-rules")]
-    pub deinflection_rules: Option<String>,
+    #[arg(long)]
+    pub deinflector: Option<String>,
 }
 
 impl Execute for LookupCommand {
@@ -89,12 +103,8 @@ impl Execute for LookupCommand {
 
         let mut terms = Vec::new();
 
-        if let Some(deinflection_rules) = &self.deinflection_rules {
-            let json_content = std::fs::read_to_string(deinflection_rules)?;
-
-            let transforms = deinflect::TransformSet::from_json(&json_content)?;
-
-            let deinflector = deinflect::Deinflector::make(transforms.clone())?;
+        if let Some(path) = &self.deinflector {
+            let deinflector = open_container::<Deinflector>(path, true)?;
 
             let start = Instant::now();
             let results = deinflector.deinflect(&self.word);

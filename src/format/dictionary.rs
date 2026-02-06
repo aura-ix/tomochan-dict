@@ -65,6 +65,7 @@ impl ContainerFormat for Dictionary {
         };
 
         if verify {
+            dict.index.verify()?;
             // TODO: verify FST
             // TODO: verify store
         }
